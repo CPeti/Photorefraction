@@ -2,6 +2,11 @@ import math
 import numpy as np
 from sympy import symbols, Eq, solve, cos, sin, sqrt, pi, tan, atan, sign
 
+#-------------------------------------------------------------#
+#             DOES NOT WORK, DO NOT USE                       #
+#                                                             #
+#-------------------------------------------------------------#
+
 def calculate_axis(gamma_h, gamma_v, rounding=True):
     """
     Calculates the axis of the astigmatic lens according to Wesemann et al. (1991).
@@ -13,15 +18,15 @@ def calculate_axis(gamma_h, gamma_v, rounding=True):
     """
     a1 = -math.atan(0.5*(-1 *2.0*math.sqrt(math.tan(gamma_h)**2*math.tan(gamma_v)**2 + 0.25*math.tan(gamma_h)**2 + 0.5*math.tan(gamma_h)*math.tan(gamma_v) + 0.25*math.tan(gamma_v)**2) + math.tan(gamma_h) + math.tan(gamma_v))/(math.tan(gamma_h)*math.tan(gamma_v)))
     a2 = -math.atan(0.5*( 1 *2.0*math.sqrt(math.tan(gamma_h)**2*math.tan(gamma_v)**2 + 0.25*math.tan(gamma_h)**2 + 0.5*math.tan(gamma_h)*math.tan(gamma_v) + 0.25*math.tan(gamma_v)**2) + math.tan(gamma_h) + math.tan(gamma_v))/(math.tan(gamma_h)*math.tan(gamma_v)))
+    if a1 < 0:
+        a1 += math.pi
+    if a2 < 0:
+        a2 += math.pi
     if rounding:
-        if a1 < 0:
-            a1 += math.pi
-        if a2 < 0:
-            a2 += math.pi
         return [round(math.degrees(a1), 4), round(math.degrees(a2), 4)]
-    return [math.degrees(a1), math.degrees(a2)]
+    return [a1, a2]
 
-def check_solution(alpha_deg, Dcyl, Dsph, measurements, dc=-1.5, e=0.012, tolerance=0.0001):
+def check_solution(alpha_deg, Dcyl, Dsph, measurements, dc=-1.5, e=0.012, tolerance=0.0001, mode="rank"):
     """
     Checks if the solution is valid.
     :param alpha_deg: The axis of the astigmatic lens in degrees.
@@ -38,12 +43,14 @@ def check_solution(alpha_deg, Dcyl, Dsph, measurements, dc=-1.5, e=0.012, tolera
     exp2 = math.atan((Dcyl*math.sin(2*alpha)) / (Dcyl*math.cos(2*alpha) + 2*Dsph + Dcyl - 2/dc)) - gamma_h
     exp3 = (dc**2/e**2 * ((Dsph - 1/dc)**2 + Dcyl*(Dsph + Dcyl/2 - 1/dc) * (1 + math.cos(2*(alpha+pi/2)))))**(-0.5) - dcr_v * np.sign(Dcyl*math.cos(2*(alpha+pi/2)) + 2*Dsph + Dcyl - 2/dc)
     exp4 = math.atan((Dcyl*math.sin(2*(alpha+pi/2))) / (Dcyl*math.cos(2*(alpha+pi/2)) + 2*Dsph + Dcyl - 2/dc))- gamma_v
-
+    sum_exp = exp1**2 + exp2**2 + exp3**2 + exp4**2
+    if mode == "rank":
+        return sum_exp
     if abs(exp1) < tolerance and abs(exp2) < tolerance and abs(exp3) < tolerance and abs(exp4) < tolerance:
         return True
     return False
 
-def calculate_diopters(DCR_h_value, DCR_v_value, gamma_h_value, gamma_v_value, e_value=0.012, d_value=-1.5, check=True, rounding=True):
+def calculate_diopters(DCR_h_value, DCR_v_value, gamma_h_value, gamma_v_value, e_value=0.012, d_value=-1.5, check=True, rounding=True, tolerance=0.0001, mode="rank"):
     """
     Calculates the diopters of the astigmatic lens.
     :param DCR_h_value: The diopter of the horizontal dark crescent.
@@ -59,7 +66,7 @@ def calculate_diopters(DCR_h_value, DCR_v_value, gamma_h_value, gamma_v_value, e
     """
     Dcyl, alpha, DCR_h, DCR_v, gamma_h, gamma_v, d, e= symbols('Dcyl alpha DCR_h DCR_v gamma_h gamma_v d e')
     axis_eq =  -atan(0.5*(1 *2.0*sqrt(tan(gamma_h)**2*tan(gamma_v)**2 + 0.25*tan(gamma_h)**2 + 0.5*tan(gamma_h)*tan(gamma_v) + 0.25*tan(gamma_v)**2) + tan(gamma_h) + tan(gamma_v))/(tan(gamma_h)*tan(gamma_v)))
-    alphas = calculate_axis(gamma_h_value, gamma_v_value)
+    alphas = calculate_axis(gamma_h_value, gamma_v_value, rounding=rounding)
     if alphas[0] % 45 == 0:
         raise ValueError("Axis is divisible by 45 degrees, tangents are infinite.")
     constants = {d: d_value, e: e_value, DCR_h: DCR_h_value, DCR_v: DCR_v_value, gamma_h: gamma_h_value, gamma_v: gamma_v_value, alpha: axis_eq}
@@ -79,17 +86,28 @@ def calculate_diopters(DCR_h_value, DCR_v_value, gamma_h_value, gamma_v_value, e
                 0.5*(-Dcyl*d*cos(2.0*alpha) - Dcyl*d + sqrt((0.5*DCR_h**2*Dcyl**2*d**2*(cos(4.0*alpha) - 1.0) + 4.0*e**2)/DCR_h**2) + 2.0)/d]
     solutions = []
     for alpha_value in alphas:
-        constants[alpha] = math.radians(alpha_value)
+        constants[alpha] = alpha_value
         for Dcyl_value in Dcyls:
+            if Dcyl_value > 0:
+                # Dcyl must be negative - by convention
+                continue
             Dsph_1 = Dsph_sol[0].subs(constants).subs({Dcyl:Dcyl_value})
             Dsph_2 = Dsph_sol[1].subs(constants).subs({Dcyl:Dcyl_value})
             solutions.append([alpha_value, Dcyl_value, Dsph_1])
             solutions.append([alpha_value, Dcyl_value, Dsph_2])
     # round the solutions to 4 decimal places
     if rounding:
-        solutions = [[round(sol[0], 6), round(sol[1], 6), round(sol[2], 6)] for sol in solutions]
+        try:
+            solutions = [[round(sol[0], 6), round(sol[1], 6), round(sol[2], 6)] for sol in solutions]
+        except:
+            return (None, None, None)
     if check:
-        solutions = [sol for sol in solutions if check_solution(sol[0], sol[1], sol[2], [DCR_h_value, gamma_h_value, DCR_v_value, gamma_v_value], d_value, e_value)]
+        if mode == "rank":
+            scores = [check_solution(sol[0], sol[1], sol[2], [DCR_h_value, gamma_h_value, DCR_v_value, gamma_v_value], d_value, e_value, tolerance=tolerance, mode=mode) for sol in solutions]
+            best_score = min(scores)
+            solutions = [sol for sol, score in zip(solutions, scores) if score == best_score]
+        else:
+            solutions = [sol for sol in solutions if check_solution(sol[0], sol[1], sol[2], [DCR_h_value, gamma_h_value, DCR_v_value, gamma_v_value], d_value, e_value, tolerance=tolerance)]
 
     return solutions
 
@@ -103,7 +121,7 @@ def forward(Dsph_value, Dcyl_value, alpha_value, d_value=-1.5, e_value=0.012):
     eqs = [eq1, eq2, eq3, eq4]
 
     sol = solve([eq.subs(constants) for eq in eqs], (DCR_h, gamma_h, DCR_v, gamma_v))
-    out = {'DCR_h': sol[DCR_h], 'gamma_h': sol[gamma_h], 'DCR_v': sol[DCR_v], 'gamma_v': sol[gamma_v]}
+    out = {'DCR_h': float(sol[DCR_h]), 'gamma_h': float(sol[gamma_h]), 'DCR_v': float(sol[DCR_v]), 'gamma_v': float(sol[gamma_v])}
 
     return out
 
