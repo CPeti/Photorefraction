@@ -12,23 +12,21 @@ def normalize(v):
 
 class Ray():
     def __init__(self, start, end):
-        start = np.array(start)
-        end = np.array(end)
         self.start = np.array(start)
         self.end = np.array(end)
         self.dir = self.end - self.start
         self.dir = normalize(self.dir)
 
-    def intersect(self, ray):
+    def intersect(self, ray: 'Ray'):
         line_a = Line(point=self.start, direction=self.dir)
         line_b = Line(point=ray.start, direction=ray.dir)
+        # occasionally fails to find intersection even when it exists - TODO fix this
         intersection = line_a.intersect_line(line_b)
         return intersection
     
 class Plane():
     def __init__(self, point, normal):
-        self.normal = normal
-        self.normal = normalize(self.normal)
+        self.normal = normalize(np.array(normal))
         self.point = point
 
     @classmethod
@@ -75,15 +73,14 @@ class Lens():
     """
     def __init__(self, center, normal, R, D_cyl, axis, D):
         self.center = np.array(center)
-        self.normal = np.array(normal)
-        self.normal = normalize(self.normal)
+        self.normal = normalize(np.array(normal))
         self.f_n = 1/(1/l_eye + 1/D)
 
         self.R = R          # spherical refractive error
         self.D_cyl = D_cyl  # astigmatic error
         self.axis = axis    # axis of astigmatism
 
-        # an astigmatic lens produces two focal lines inside sturm cones
+        # an astigmatic lens produces two focal lines instead of a single focal point - called sturm lines
         # once we have calculated the location of the sturm lines,
         # we can use them to refract rays more accurately than with the paraxial approximation of the astigmatic lens
         self.sturm_line1_1 = None
@@ -116,9 +113,8 @@ class Lens():
 
         # Powers in Oblique Meridians Formula
         # D_sum = R + sin(angle)^2 * D_cyl
-        focal_length = 1/(1/self.f_n + self.R + pow(np.sin(angle), 2) * self.D_cyl)
+        focal_length = 1/(1/self.f_n - (self.R + pow(np.sin(angle), 2) * self.D_cyl))
         focal_point = self.center - self.normal * focal_length
-
 
         center_ray = Ray(ray.start, self.center)
         orthogonal_ray = Ray(ray.start, ray.start-self.normal)
@@ -168,7 +164,7 @@ class Camera():
         return Ray(self.loc, direction)
         
 class Scene():
-    def __init__(self, camera_pos, light_pos, lens_pos, retina_pos, R, D_cyl, axis, r_p, D, w_width=100, w_height=100):
+    def __init__(self, camera_pos, light_pos, lens_pos, retina_pos, R, D_cyl, axis, D, r_p, w_width=100, w_height=100):
         self.lens_object = Lens(lens_pos, np.array((0, 0, 1)), R, D_cyl, axis, D)
         sphere_center = retina_pos + np.array([0, 0, -l_eye/2])
         self.retina_object = Sphere(sphere_center, l_eye/2)
@@ -196,6 +192,7 @@ class Scene():
 
     def cast_camera_rays(self):
         # cast rays from camera to 4 corners of the lens
+        #  - these 4 rays are not at oblique angles, and can be refracted using the thin lens model without approximation
         camera_rays = []
         camera_rays.append(Ray(self.camera_pos, self.lens_pos + np.array((self.a,  self.b,  0))))
         camera_rays.append(Ray(self.camera_pos, self.lens_pos + np.array((-self.a, -self.b, 0)))) # top of crescent
@@ -222,7 +219,6 @@ class Scene():
 
         self.image_point_cam = np.mean([camera_ray_focus1, camera_ray_focus2], axis=0)
 
-        #logging
         self.camera_hits = camera_hits
 
     def cast_light_rays(self):
@@ -253,16 +249,15 @@ class Scene():
 
         self.image_point = np.mean([light_ray_focus1, light_ray_focus2], axis=0)
 
-        #logging
         self.light_hits = light_hits
 
-    def trace(self, ray: Ray, La, Le, ka, kd, ks, shininess, shade=True):
-        outRadience = np.zeros(3)
+    def trace(self, ray: Ray, fundus_color=(1, 0, 0), crescent_color=(1, 1, 0.5), shade=False):
+        fundus_color = np.array(fundus_color)
+        crescent_color = np.array(crescent_color)
         lens_hit = self.lens_object.intersect(ray)
             
         if length(lens_hit - self.lens_object.center) > self.r_p: # ray misses lens
-            return outRadience
-        outRadience += ka * La # ambient light
+            return (0, 0, 0)
 
         camera_ray = self.lens_object.refract(ray)
         retina_hit = self.retina_object.intersect(camera_ray)
@@ -281,49 +276,19 @@ class Scene():
 
         if distance_to_edge > self.r_p: # ray misses lens - point is not illuminated
             if shade:
-                return outRadience * (self.r_p / distance_to_edge) ** 1.8
+                return fundus_color * (self.r_p / distance_to_edge) ** shade
             else:
-                return outRadience
-        
-        d_inside = length(retina_hit - entry_point)
-        d_outside = length(entry_point - self.light_pos)
-        d_sum = d_inside + d_outside
-
-        normal = normalize(retina_hit - self.retina_object.center)
-
-        # if the focal point falls behind the retina, invert the light ray 
-        # TODO: actually check if its behind retina
-        if self.lens_object.R + self.lens_object.D_cyl > 0:
-            light_ray.dir = -light_ray.dir
-
-        cosTheta = np.dot(light_ray.dir, normal)
-        if cosTheta > 0:
-            LeIn = Le / (d_sum**2)
-            outRadience += kd * LeIn * cosTheta
-            halfway = normalize(light_ray.dir - camera_ray.dir)
-
-
-            cosDelta = np.dot(halfway, normal)
-            if cosDelta > 0:
-                outRadience += LeIn * ks * pow(cosDelta, shininess)
-        
-        return outRadience
+                return fundus_color        
+        return crescent_color
     
-    def render(self, glow=True, blur=True, shade=True):
+    def render(self, fundus_color=(1, 0, 0), crescent_color=(1, 1, 0.5), glow=True, blur=True, shade=5):
         # material properties
-        kd = np.array([0.93333333, 0.31764706, 0.25098039])*0.15
-        ka = np.array([0.93333333, 0.31764706, 0.25098039]) * 0.25
-        ks = np.array([1.0, 1.0, 0.0])*4.8
-        shininess = 0.5
-        La = np.array([1, 1, 1])*8
-        Le = np.array([1, 1, 1])*0.5
-
         image = np.zeros((self.w_height, self.w_width, 3), dtype=np.uint8)
 
         for x in range(self.w_width):
             for y in range(self.w_height):
                 ray = self.camera.getRay(x, y)
-                outRadience = self.trace(ray, La, Le, ka, kd, ks, shininess, shade=shade)
+                outRadience = self.trace(ray, crescent_color=crescent_color, fundus_color=fundus_color, shade=shade)
                 outRadience = np.clip(outRadience, 0, 1) * 255
                 image[y, x] = outRadience.astype(np.uint8)
         if glow:
@@ -332,7 +297,7 @@ class Scene():
             image = self.add_blur(image)
         return image
         
-    def add_glow(self, image):
+    def add_glow(self, image): # TODO make this more realistic
         # add white glow to center of eye
         center = (int(self.w_width/2), int(self.w_height/2))
         reflection_radius = self.w_width/16 - 1
@@ -353,11 +318,55 @@ class Scene():
         center = (int(self.w_width/2), int(self.w_height/2))
         for x in range(self.w_width):
             for y in range(self.w_height):
-                noised[y, x] = np.clip(noised[y, x] + np.random.normal(0.5, 0.5, 3)*0.05 * 255, 0, 255)
+                # TODO make this more realistic
+                noised[y, x] = np.clip(noised[y, x] + np.random.normal(0.5, 0.5, 3)*0.05 * 255, 0, 255) 
                 if length(np.array([x, y]) - np.array(center)) > self.w_width/2:
                     noised[y, x] = (0, 0, 0)
 
         return noised
+    
+
+def generate_crescent(R, D_cyl, axis, e, D, r_p,
+                    orientation='V',
+                    fundus_color=(1, 0, 0), 
+                    crescent_color=(1, 1, 0.5), 
+                    shade=0.8, blur=True, glow=True, 
+                    size=100):
+    """
+    Generate a synthetic image of a crescent
+    Parameters:
+    R: spherical refractive error
+    D_cyl: astigmatic error
+    axis: axis of astigmatism
+    e: distance from light source to camera
+    D: distance from camera to lens
+    r_p: pupil radius
+    fundus_color: color of the fundus: 0-1 RGB tuple
+    crescent_color: color of the crescent: 0-1 RGB tuple
+    shade: shading factor of fundus pixels based on distance to edge of crescent. Larger values makes the intensity of the non-illuminated pixels decrease faster.
+    blur: apply some noise and a gaussian blur to the image
+    glow: add a white glow to the center of the image
+    size: width and height of the image
+    """
+    eps = 0
+    camera_pos = (0, 0, D)
+    if orientation == 'V':
+        light_pos = (0, -e, D)
+    elif orientation == 'H':
+        light_pos = (e, 0, D)
+    else:
+        raise ValueError('Orientation must be V or H')
+    lens_pos = (0, 0, 0)
+    retina_pos = (0, 0, -l_eye)
+    success = False
+    while not success:
+        try:
+            axis_rad = np.deg2rad(axis-90 + eps) # convert axis to radians measured from x-axis
+            scene = Scene(camera_pos, light_pos, lens_pos, retina_pos, R, D_cyl, axis_rad, D, r_p, w_width=size, w_height=size)
+            success = True
+        except ValueError:
+            eps += 1e-6
+    return scene.render(fundus_color=fundus_color, crescent_color=crescent_color, shade=shade, blur=blur, glow=glow)
     
 
         
